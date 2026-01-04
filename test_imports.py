@@ -48,7 +48,8 @@ except Exception as e:
 
 try:
     print("\n3. 测试 douban_crawler 导入...")
-    from douban_crawler import get_douban_movies, get_douban_movie_detail
+    from douban_crawler import get_douban_movies
+    from douban_detail import get_douban_movie_detail
     print(f"   ✓ 成功导入 get_douban_movies, get_douban_movie_detail")
     
 except Exception as e:

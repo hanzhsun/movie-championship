@@ -36,6 +36,29 @@ import pandas as pd
 from io import StringIO
 
 
+def normalize_cookies(cookies):
+    if isinstance(cookies, dict):
+        return cookies
+    if isinstance(cookies, list):
+        result = {}
+        for item in cookies:
+            if isinstance(item, dict):
+                name = item.get('name')
+                value = item.get('value')
+                if name and value is not None:
+                    result[name] = value
+        return result
+    if isinstance(cookies, str):
+        result = {}
+        parts = [p.strip() for p in cookies.split(';') if p.strip()]
+        for part in parts:
+            if '=' in part:
+                key, value = part.split('=', 1)
+                result[key.strip()] = value.strip()
+        return result
+    return {}
+
+
 def load_douban_config(config_file):
     """加载豆瓣配置
     
@@ -51,8 +74,7 @@ def load_douban_config(config_file):
         config = json.load(f)
     
     user_id = config.get('user_id')
-    cookies = config.get('cookies', {})
-    
+    cookies = normalize_cookies(config.get('cookies', {}))
     if not user_id:
         raise ValueError("配置文件中缺少 user_id")
     
@@ -90,7 +112,17 @@ def load_watched_movies(file_path):
     
     返回: DataFrame，如果文件不存在则返回空 DataFrame
     """
+    def csv_fallback_path(xlsx_path):
+        base, _ = os.path.splitext(xlsx_path)
+        return base + '.csv'
+
     if not os.path.exists(file_path):
+        csv_path = csv_fallback_path(file_path)
+        if os.path.exists(csv_path):
+            try:
+                return pd.read_csv(csv_path)
+            except Exception as e:
+                print(f"Loading CSV fallback failed: {e}")
         # 返回空 DataFrame，包含预期的列
         return pd.DataFrame(columns=['id', 'title', 'link', 'date', 'rating', 'poster_url'])
     
@@ -99,6 +131,12 @@ def load_watched_movies(file_path):
         return df
     except Exception as e:
         print(f"加载 {file_path} 失败: {e}")
+        csv_path = csv_fallback_path(file_path)
+        if os.path.exists(csv_path):
+            try:
+                return pd.read_csv(csv_path)
+            except Exception as csv_e:
+                print(f"Loading CSV fallback failed: {csv_e}")
         return pd.DataFrame(columns=['id', 'title', 'link', 'date', 'rating', 'poster_url'])
 
 

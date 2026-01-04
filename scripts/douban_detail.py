@@ -17,7 +17,7 @@
 ```python
 from douban_detail import get_douban_movie_detail
 
-imdb_id, genres, language, runtime = get_douban_movie_detail(
+imdb_id, genres, language, runtime, year = get_douban_movie_detail(
     "https://movie.douban.com/subject/1291546/",
     cookies=your_cookies
 )
@@ -34,18 +34,13 @@ from bs4 import BeautifulSoup
 import re
 
 def get_douban_movie_detail(movie_url, cookies=None):
-    """从豆瓣电影详情页提取信息
-    
-    参数:
-        movie_url: 豆瓣电影详情页URL
-        cookies: 可选的Cookie字典，用于需要登录的页面
-    
-    返回: (imdb_id, genres, language, runtime) 元组
-    runtime: 片长（分钟），整数
+    """Fetch details from Douban detail page.
+
+    Returns (imdb_id, genres, language, runtime, year)
     """
     if not movie_url:
-        return None, None, None, None
-    
+        return None, None, None, None, None
+
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -53,88 +48,91 @@ def get_douban_movie_detail(movie_url, cookies=None):
             'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate',
         }
-        
+
         response = requests.get(movie_url, headers=headers, cookies=cookies, timeout=10)
         if response.status_code != 200:
-            return None, None, None, None
-        
+            return None, None, None, None, None
+        response.encoding = 'utf-8'
+
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 查找 info div
         info_div = soup.find('div', id='info')
-        if not info_div:
-            return None, None, None, None
-        
+
         imdb_id = None
         genres = []
         language = None
         runtime = None
-        
-        # 提取 IMDb ID
-        for span in info_div.find_all('span', class_='pl'):
-            span_text = span.get_text(strip=True)
-            if span_text == 'IMDb:' or span_text == 'IMDb':
-                # 获取span后面的文本节点
-                next_sibling = span.next_sibling
-                if next_sibling:
-                    imdb_text = next_sibling.strip() if isinstance(next_sibling, str) else next_sibling.get_text(strip=True)
-                    if imdb_text:
-                        # 从文本中提取 IMDb ID（格式是 "tt6924650"），保留完整的 tt 前缀
-                        imdb_match = re.search(r'(tt\d+)', imdb_text)
-                        if imdb_match:
-                            imdb_id = imdb_match.group(1)
-                break
-        
-        # 提取类型（忽略'剧情'）
-        genre_spans = info_div.find_all('span', attrs={'property': 'v:genre'})
-        for span in genre_spans:
-            genre_text = span.get_text(strip=True)
-            if genre_text and genre_text != '剧情':  # 忽略'剧情'
-                genres.append(genre_text)
-        
-        # 提取语言
-        for span in info_div.find_all('span', class_='pl'):
-            span_text = span.get_text(strip=True)
-            if span_text == '语言:' or span_text == '语言':
-                # 获取span后面的文本节点（第一个语言）
-                current = span.next_sibling
-                while current:
-                    if hasattr(current, 'name'):
-                        if current.name == 'a':
-                            language = current.get_text(strip=True)
-                            break
-                        elif current.name == 'br':
-                            break
-                    elif isinstance(current, str) and current.strip():
-                        # 尝试从文本中提取
-                        text = current.strip()
-                        if text and text not in ['/', '、']:
-                            language = text.split('/')[0].split('、')[0].strip()
-                            break
-                    current = current.next_sibling
-                break
-        
-        # 提取片长（分钟）
-        for span in info_div.find_all('span', class_='pl'):
-            span_text = span.get_text(strip=True)
-            if span_text == '片长:' or span_text == '片长':
-                # 获取span后面的文本节点
-                next_sibling = span.next_sibling
-                if next_sibling:
-                    runtime_text = next_sibling.strip() if isinstance(next_sibling, str) else next_sibling.get_text(strip=True)
-                    if runtime_text:
-                        # 从文本中提取数字
-                        runtime_match = re.search(r'(\d+)\s*分钟', runtime_text)
-                        if runtime_match:
-                            runtime = int(runtime_match.group(1))
-                break
-        
-        genres_str = ', '.join(genres) if genres else None
-        
-        return imdb_id, genres_str, language, runtime
-        
-    except Exception as e:
-        # 静默处理错误，返回 None 值
-        # 不在这里打印，因为 stdout 可能已关闭（Flask 开发模式）
-        # 错误会被上层的 safe_print 处理
-        return None, None, None, None
+        year = None
+
+        if info_div:
+            imdb_link = info_div.select_one('a[href*="imdb.com/title"]')
+            if imdb_link:
+                imdb_text = imdb_link.get_text(strip=True) or imdb_link.get('href', '')
+                match = re.search(r'(tt\d+)', imdb_text)
+                if match:
+                    imdb_id = match.group(1)
+            if not imdb_id:
+                imdb_text = info_div.get_text(' ', strip=True)
+                match = re.search(r'(tt\d+)', imdb_text)
+                if match:
+                    imdb_id = match.group(1)
+
+            genre_spans = info_div.select('span[property="v:genre"]')
+            genres = [span.get_text(strip=True) for span in genre_spans if span.get_text(strip=True)]
+            genres = [g for g in genres if g != '剧情']
+
+            def extract_label_value(label):
+                def normalize_label(text):
+                    return text.replace(':', '').replace('：', '').strip()
+
+                for span in info_div.select('span.pl'):
+                    span_text = normalize_label(span.get_text(strip=True))
+                    if span_text == label:
+                        current = span.next_sibling
+                        parts = []
+                        while current:
+                            if getattr(current, 'name', None) == 'br':
+                                break
+                            if isinstance(current, str):
+                                if current.strip():
+                                    parts.append(current.strip())
+                            else:
+                                if current.name in ('a', 'span'):
+                                    text = current.get_text(strip=True)
+                                    if text:
+                                        parts.append(text)
+                            current = current.next_sibling
+                        return ' '.join(parts).strip() if parts else None
+                return None
+
+            lang_text = extract_label_value('语言')
+            if lang_text:
+                language = re.split(r'[/、,，]', lang_text, 1)[0].strip()
+
+            runtime_span = info_div.select_one('span[property="v:runtime"]')
+            if runtime_span:
+                runtime_text = runtime_span.get('content') or runtime_span.get_text(strip=True)
+                match = re.search(r'(\d+)', runtime_text or '')
+                if match:
+                    runtime = int(match.group(1))
+
+            if runtime is None:
+                runtime_text = extract_label_value('片长')
+                match = re.search(r'(\d+)', runtime_text or '')
+                if match:
+                    runtime = int(match.group(1))
+
+            if not genres:
+                genre_text = extract_label_value('类型')
+                if genre_text:
+                    genres = [g.strip() for g in re.split(r'[/、,，]', genre_text) if g.strip() and g != '剧情']
+
+        year_elem = soup.select_one('span.year')
+        if year_elem:
+            match = re.search(r'(\d{4})', year_elem.get_text(strip=True))
+            if match:
+                year = int(match.group(1))
+
+        return imdb_id, genres, language, runtime, year
+
+    except Exception:
+        return None, None, None, None, None

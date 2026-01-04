@@ -350,6 +350,18 @@ const MovieRewindApp = () => {
   const [loading, setLoading] = useState(false);
   const [loadingDouban, setLoadingDouban] = useState(false);
   const [loadingImdb, setLoadingImdb] = useState(false);
+  const [doubanProgress, setDoubanProgress] = useState<{
+    message: string;
+    progress: number;
+    total: number;
+    percentage: number;
+  } | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<{
+    message: string;
+    progress: number;
+    total: number;
+    percentage: number;
+  } | null>(null);
   const [selectedMovies, setSelectedMovies] = useState<Set<string>>(new Set());
   const [trophyMovies, setTrophyMovies] = useState<Set<string>>(new Set());
   const [genreWinners, setGenreWinners] = useState<Map<string, string>>(new Map());
@@ -371,26 +383,94 @@ const MovieRewindApp = () => {
   // 从豆瓣更新
   const refreshFromDouban = async () => {
     setLoadingDouban(true);
+    setDoubanProgress({ message: '开始更新...', progress: 0, total: 0, percentage: 0 });
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/movies/update-douban`);
-      if (response.data.success) {
-        await fetchLocalMovies();
-        alert(`更新成功：新增 ${response.data.new_count} 部电影`);
+      const url = `${API_BASE_URL}/api/movies/update-douban?stream=1`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
-    } catch (error) {
-      alert('更新失败，请检查后端服务');
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalResult: any = null;
+
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(5));
+
+              if (data.message !== undefined) {
+                if (data.progress !== undefined && data.total !== undefined) {
+                  setDoubanProgress({
+                    message: data.message,
+                    progress: data.progress,
+                    total: data.total,
+                    percentage: data.percentage || (data.total > 0 ? Math.round((data.progress / data.total) * 100) : 0)
+                  });
+                } else {
+                  setDoubanProgress(prev => prev ? {
+                    ...prev,
+                    message: data.message
+                  } : {
+                    message: data.message,
+                    progress: 0,
+                    total: 0,
+                    percentage: 0
+                  });
+                }
+              }
+
+              if (data.success !== undefined) {
+                finalResult = data;
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+          }
+        }
+      }
+
+      if (finalResult) {
+        if (finalResult.success) {
+          setDoubanProgress(null);
+          await fetchLocalMovies();
+          alert(`Douban updated, new movies: ${finalResult.new_count}`);
+        } else {
+          setDoubanProgress(null);
+          const msg = finalResult.message || finalResult.error || 'Unknown error';
+          alert(`Douban update failed: ${msg}`);
+        }
+      } else {
+        setDoubanProgress(null);
+      }
+    } catch (error: any) {
+      setDoubanProgress(null);
+      const msg = error?.message || 'request error';
+      alert(`Douban update failed: ${msg}`);
     } finally {
       setLoadingDouban(false);
     }
   };
-
-  // 从IMDb更新（带进度显示）
-  const [updateProgress, setUpdateProgress] = useState<{
-    message: string;
-    progress: number;
-    total: number;
-    percentage: number;
-  } | null>(null);
 
   const refreshFromImdb = async () => {
     setLoadingImdb(true);
@@ -465,6 +545,7 @@ const MovieRewindApp = () => {
         if (finalResult.success) {
           setUpdateProgress(null);
           await fetchLocalMovies();
+          await fetchTagMoviesMapping();
         } else {
           setUpdateProgress(null);
           alert(`更新失败: ${finalResult.error || '未知错误'}`);
@@ -486,12 +567,22 @@ const MovieRewindApp = () => {
 
   // 获取本地电影数据
   const fetchLocalMovies = useCallback(async () => {
+    const normalizeMovies = (movies: any[]): DoubanMovie[] => {
+      return movies.map((movie) => ({
+        ...movie,
+        id: movie?.id !== undefined && movie?.id !== null ? String(movie.id) : ''
+      }));
+    };
+
     setLoading(true);
     try {
       const endpoint = activeTab === 'calendar' ? '/api/movies/watched' : '/api/movies/tags';
       const response = await axios.get(`${API_BASE_URL}${endpoint}`);
-      if (response.data?.success && response.data?.movies) {
-        setDoubanMovies(response.data.movies);
+      const data = response.data;
+      if (Array.isArray(data)) {
+        setDoubanMovies(normalizeMovies(data));
+      } else if (Array.isArray(data?.movies)) {
+        setDoubanMovies(normalizeMovies(data.movies));
       } else {
         setDoubanMovies([]);
       }
@@ -509,7 +600,22 @@ const MovieRewindApp = () => {
       if (response.data?.success && response.data?.mapping) {
         const mapping = new Map<string, string[]>();
         Object.entries(response.data.mapping).forEach(([tag, movieIds]: [string, any]) => {
-          mapping.set(tag, Array.isArray(movieIds) ? movieIds : []);
+          if (!Array.isArray(movieIds)) {
+            mapping.set(tag, []);
+            return;
+          }
+          const normalizedIds = movieIds
+            .map((item: any) => {
+              if (typeof item === 'string' || typeof item === 'number') {
+                return String(item);
+              }
+              if (item && (typeof item.id === 'string' || typeof item.id === 'number')) {
+                return String(item.id);
+              }
+              return null;
+            })
+            .filter((id: string | null): id is string => Boolean(id));
+          mapping.set(tag, normalizedIds);
         });
         setTagMoviesMapping(mapping);
       }
@@ -529,6 +635,26 @@ const MovieRewindApp = () => {
     };
     loadData();
   }, [activeTab, fetchLocalMovies]);
+
+  // 计算可选年份（来自已加载的电影数据）
+  const availableYears = useMemo(() => {
+    const years = new Set<number>();
+    doubanMovies.forEach(movie => {
+      if (!movie.date) return;
+      const date = new Date(movie.date);
+      const year = date.getFullYear();
+      if (!Number.isNaN(year)) {
+        years.add(year);
+      }
+    });
+    return Array.from(years).sort((a, b) => b - a);
+  }, [doubanMovies]);
+
+  useEffect(() => {
+    if (availableYears.length > 0 && !availableYears.includes(selectedYear)) {
+      setSelectedYear(availableYears[0]);
+    }
+  }, [availableYears, selectedYear]);
 
   // 按年份过滤电影
   const filteredMovies = useMemo(() => {
@@ -768,8 +894,9 @@ const MovieRewindApp = () => {
               onChange={(e) => setSelectedYear(Number(e.target.value))}
               className="appearance-none bg-white border border-green-200 rounded-lg px-4 py-1.5 pr-8 text-sm font-medium text-emerald-800 hover:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 cursor-pointer"
             >
-              <option value={2025}>2025</option>
-              <option value={2024}>2024</option>
+              {(availableYears.length > 0 ? availableYears : [selectedYear]).map((year) => (
+                <option key={year} value={year}>{year}</option>
+              ))}
             </select>
             <ChevronDown className="absolute right-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-emerald-600 pointer-events-none" />
           </div>
@@ -779,13 +906,45 @@ const MovieRewindApp = () => {
         <div className="flex items-center gap-3">
           <span className="text-sm text-slate-600">已获取 {filteredMovies.length} 部电影</span>
           {activeTab === 'calendar' && (
-            <button
-              onClick={refreshFromDouban}
-              disabled={loadingDouban}
-              className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-            >
-              {loadingDouban ? '更新中...' : '从豆瓣更新'}
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={refreshFromDouban}
+                disabled={loadingDouban}
+                className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {loadingDouban ? '更新中...' : '从豆瓣更新'}
+              </button>
+              {doubanProgress && (
+                <div className="flex items-center gap-2 text-sm text-slate-600">
+                  <div className="relative w-6 h-6">
+                    <svg className="w-6 h-6 -rotate-90" viewBox="0 0 24 24" fill="none">
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        className="text-emerald-100"
+                      />
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        className="text-emerald-500"
+                        strokeDasharray={2 * Math.PI * 9}
+                        strokeDashoffset={(2 * Math.PI * 9) * (1 - (doubanProgress.percentage || 0) / 100)}
+                      />
+                    </svg>
+                  </div>
+                  <span className="text-xs text-slate-500 whitespace-nowrap">
+                    {doubanProgress.total > 0 ? `${doubanProgress.progress}/${doubanProgress.total}` : `${doubanProgress.progress}`}
+                  </span>
+                </div>
+              )}
+            </div>
           )}
           {activeTab === 'overview' && (
             <div className="flex items-center gap-3">
@@ -799,15 +958,27 @@ const MovieRewindApp = () => {
               {updateProgress && (
                 <div className="flex items-center gap-2 text-sm text-slate-600">
                   <div className="relative w-6 h-6">
-                    <svg className="animate-spin h-6 w-6 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    <svg className="w-6 h-6 -rotate-90" viewBox="0 0 24 24" fill="none">
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        className="text-yellow-100"
+                      />
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        className="text-yellow-500"
+                        strokeDasharray={2 * Math.PI * 9}
+                        strokeDashoffset={(2 * Math.PI * 9) * (1 - (updateProgress.percentage || 0) / 100)}
+                      />
                     </svg>
-                    {updateProgress.total > 0 && (
-                      <span className="absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-emerald-600">
-                        {updateProgress.percentage}%
-                      </span>
-                    )}
                   </div>
                   <span className="text-xs">{updateProgress.message}</span>
                   {updateProgress.total > 0 && (
@@ -881,6 +1052,7 @@ const MovieRewindApp = () => {
                         {genre.movies.map((movie) => {
                           const trophyKey = `${genre.id}-${movie.id}`;
                           const hasTrophy = trophyMovies.has(trophyKey);
+                          const isFiveStar = movie.rating === 5;
                           return (
                             <span
                               key={movie.id}
@@ -894,6 +1066,12 @@ const MovieRewindApp = () => {
                                 setTrophyMovies(newTrophyMovies);
                               }}
                               className={`relative text-sm text-slate-600 bg-green-50/50 px-3 py-2 rounded border transition-all cursor-pointer ${
+                                isFiveStar
+                                  ? hasTrophy
+                                    ? 'shadow-lg shadow-emerald-500/40'
+                                    : 'ring-2 ring-emerald-500 shadow-lg shadow-emerald-500/40'
+                                  : ''
+                              } ${
                                 hasTrophy 
                                   ? 'ring-2 ring-yellow-400 border-yellow-300 hover:border-yellow-400 hover:text-emerald-800 hover:bg-white' 
                                   : 'border-green-100 hover:border-emerald-400 hover:text-emerald-800 hover:bg-white'
@@ -945,7 +1123,7 @@ const MovieRewindApp = () => {
                         {movie.id ? (
                           <div className="relative w-full h-full">
                             <img
-                              src={`${API_BASE_URL}/api/posters/${movie.id}.jpg`}
+                              src={`${API_BASE_URL}/api/posters/${movie.id}`}
                               alt={movie.title}
                               className="w-full h-full object-cover"
                               loading="lazy"

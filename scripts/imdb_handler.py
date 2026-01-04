@@ -39,36 +39,42 @@ def get_imdb_tags(imdb_id):
         return ""
     
     try:
-        url = f"https://www.imdb.com/title/{imdb_id}/"
+        imdb_id_str = str(imdb_id).strip()
+        if not imdb_id_str.startswith('tt'):
+            imdb_id_str = f'tt{imdb_id_str}'
+        url = f"https://www.imdb.com/title/{imdb_id_str}/"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate',
         }
         
         response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return ""
         response.encoding = 'utf-8'
         html = response.text
         
         soup = BeautifulSoup(html, 'html.parser')
         
         tags = []
-        
-        # 方法1: 查找 span 标签，data-testid 为 genres
-        genre_spans = soup.find_all('span', {'data-testid': 'genres'})
-        if genre_spans:
-            for span in genre_spans:
-                for link in span.find_all('a'):
-                    text = link.text.strip()
-                    if text:
-                        tags.append(text)
-        
-        # 方法2: 备选查找方式
-        if not tags:
-            genre_section = soup.find('section', {'data-testid': 'genres'})
-            if genre_section:
-                for link in genre_section.find_all('a'):
-                    text = link.text.strip()
-                    if text and text not in tags:
-                        tags.append(text)
+
+        interests_section = (
+            soup.find('section', {'data-testid': 'interests'})
+            or soup.find('div', {'data-testid': 'interests'})
+        )
+        chip_container = None
+        if interests_section:
+            chip_container = interests_section.find('div', class_='ipc-chip-list__scroller') or interests_section
+        if not chip_container:
+            chip_container = soup.find('div', class_='ipc-chip-list__scroller')
+        if chip_container:
+            chip_spans = chip_container.find_all('span', class_='ipc-chip__text')
+            for span in chip_spans:
+                text = span.get_text(strip=True)
+                if text and text not in tags:
+                    tags.append(text)
         
         # 过滤掉语言标签和不需要的通用标签
         filtered_tags = []
@@ -80,7 +86,7 @@ def get_imdb_tags(imdb_id):
                 continue
             filtered_tags.append(tag)
         
-        return ', '.join(filtered_tags[:5]) if filtered_tags else ""
+        return ', '.join(filtered_tags) if filtered_tags else ""
         
     except Exception as e:
         print(f"获取 IMDb 标签失败: {e}")
